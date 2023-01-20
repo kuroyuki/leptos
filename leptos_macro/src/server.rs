@@ -47,9 +47,9 @@ pub fn server_macro_impl(args: proc_macro::TokenStream, s: TokenStream2) -> Resu
             use proc_macro::Span;
             let span = Span::call_site();
             #[cfg(not(target_os = "windows"))]
-            let url = format!("{}/{}", span.source_file().path().to_string_lossy(), fn_name_as_str).replace("/", "-");
+            let url = format!("{}/{}", span.source_file().path().to_string_lossy(), fn_name_as_str).replace('/', "-");
             #[cfg(target_os = "windows")]
-            let url = format!("{}/{}", span.source_file().path().to_string_lossy(), fn_name_as_str).replace("\\", "-");
+            let url = format!("{}\\{}", span.source_file().path().to_string_lossy(), fn_name_as_str).replace("\\", "-");
         } else {
             let url = fn_name_as_str;
         }
@@ -133,7 +133,7 @@ pub fn server_macro_impl(args: proc_macro::TokenStream, s: TokenStream2) -> Resu
             #(#fields),*
         }
 
-        impl ServerFn for #struct_name {
+        impl leptos::ServerFn for #struct_name {
             type Output = #output_ty;
 
             fn prefix() -> &'static str {
@@ -148,14 +148,14 @@ pub fn server_macro_impl(args: proc_macro::TokenStream, s: TokenStream2) -> Resu
                 #encoding
             }
 
-            #[cfg(feature = "ssr")]
+            #[cfg(any(feature = "ssr", doc))]
             fn call_fn(self, cx: ::leptos::Scope) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Output, ::leptos::ServerFnError>>>> {
                 let #struct_name { #(#field_names),* } = self;
                 #cx_assign_statement;
                 Box::pin(async move { #fn_name( #cx_fn_arg #(#field_names_2),*).await })
             }
 
-            #[cfg(not(feature = "ssr"))]
+            #[cfg(any(not(feature = "ssr"), doc))]
             fn call_fn_client(self, cx: ::leptos::Scope) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Output, ::leptos::ServerFnError>>>> {
                 let #struct_name { #(#field_names_3),* } = self;
                 Box::pin(async move { #fn_name( #cx_fn_arg #(#field_names_4),*).await })

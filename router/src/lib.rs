@@ -1,7 +1,9 @@
+#![forbid(unsafe_code)]
+
 //! # Leptos Router
 //!
 //! Leptos Router is a router and state management tool for web applications
-//! written in Rust using the [Leptos](https://github.com/gbj/leptos) web framework.
+//! written in Rust using the [Leptos](https://github.com/leptos-rs/leptos) web framework.
 //! It is ”isomorphic,” i.e., it can be used for client-side applications/single-page
 //! apps (SPAs), server-side rendering/multi-page apps (MPAs), or to synchronize
 //! state between the two.
@@ -32,9 +34,6 @@
 //!    them with server-side rendering (with or without hydration), they just work,
 //!    whether JS/WASM have loaded or not.
 //!
-//!    Note as well that client-side routing works with ordinary `<a>` tags, as well,
-//!    so you do not even need to use the `<A/>` component in most cases.
-//!
 //! ## Example
 //!
 //! ```rust
@@ -42,7 +41,8 @@
 //! use leptos::*;
 //! use leptos_router::*;
 //!
-//! pub fn router_example(cx: Scope) -> Element {
+//! #[component]
+//! pub fn RouterExample(cx: Scope) -> impl IntoView {
 //!   view! {
 //!     cx,
 //!     <div id="root">
@@ -63,23 +63,23 @@
 //!             // our root route: the contact list is always shown
 //!             <Route
 //!               path=""
-//!               element=move |cx| view! { cx,  <ContactList/> }
+//!               view=move |cx| view! { cx,  <ContactList/> }
 //!             >
 //!               // users like /gbj or /bob
 //!               <Route
 //!                 path=":id"
-//!                 element=move |cx| view! { cx,  <Contact/> }
+//!                 view=move |cx| view! { cx,  <Contact/> }
 //!               />
 //!               // a fallback if the /:id segment is missing from the URL
 //!               <Route
 //!                 path=""
-//!                 element=move |_| view! { cx,  <p class="contact">"Select a contact."</p> }
+//!                 view=move |_| view! { cx,  <p class="contact">"Select a contact."</p> }
 //!               />
 //!             </Route>
 //!             // LR will automatically use this for /about, not the /:id match above
 //!             <Route
 //!               path="about"
-//!               element=move |cx| view! { cx,  <About/> }
+//!               view=move |cx| view! { cx,  <About/> }
 //!             />
 //!           </Routes>
 //!         </main>
@@ -103,7 +103,7 @@
 //! }
 //!
 //! #[component]
-//! fn ContactList(cx: Scope) -> Element {
+//! fn ContactList(cx: Scope) -> impl IntoView {
 //!   // loads the contact list data once; doesn't reload when nested routes change
 //!   let contacts = create_resource(cx, || (), |_| contact_list_data());
 //!   view! {
@@ -121,7 +121,7 @@
 //! }
 //!
 //! #[component]
-//! fn Contact(cx: Scope) -> Element {
+//! fn Contact(cx: Scope) -> impl IntoView {
 //!   let params = use_params_map(cx);
 //!   let data = create_resource(
 //!     cx,
@@ -132,10 +132,53 @@
 //! }
 //!
 //! #[component]
-//! fn About(cx: Scope) -> Element {
+//! fn About(cx: Scope) -> impl IntoView {
 //!   todo!()
 //! }
 //!
+//! ```
+//!
+//! ## Module Route Definitions
+//! Routes can also be modularized and nested by defining them in separate components, which can be
+//! located in and imported from other modules. Components that return `<Route/>` should be marked
+//! `#[component(transparent)]`, as in this example:
+//! ```rust
+//! use leptos::*;
+//! use leptos_router::*;
+//!
+//! #[component]
+//! pub fn App(cx: Scope) -> impl IntoView {
+//!   view! { cx,
+//!     <Router>
+//!       <Routes>
+//!         <Route path="/" view=move |cx| {
+//!           view! { cx, "-> /" }
+//!         }/>
+//!         <ExternallyDefinedRoute/>
+//!       </Routes>
+//!     </Router>
+//!   }
+//! }
+//!
+//! // `transparent` here marks the component as returning data (a RouteDefinition), not a view
+//! #[component(transparent)]
+//! pub fn ExternallyDefinedRoute(cx: Scope) -> impl IntoView {
+//!   view! { cx,
+//!     <Route path="/some-area" view=move |cx| {
+//!       view! { cx, <div>
+//!         <h2>"Some Area"</h2>
+//!         <Outlet/>
+//!       </div> }
+//!     }>
+//!       <Route path="/path-a/:id" view=move |cx| {
+//!         view! { cx, <p>"Path A"</p> }
+//!       }/>
+//!       <Route path="/path-b/:id" view=move |cx| {
+//!         view! { cx, <p>"Path B"</p> }
+//!       }/>
+//!     </Route>
+//!   }
+//! }
 //! ```
 
 #![cfg_attr(not(feature = "stable"), feature(auto_traits))]
@@ -143,11 +186,16 @@
 #![cfg_attr(not(feature = "stable"), feature(type_name_of_val))]
 
 mod components;
+#[cfg(any(feature = "ssr", doc))]
+mod extract_routes;
 mod history;
 mod hooks;
-mod matching;
+#[doc(hidden)]
+pub mod matching;
 
 pub use components::*;
+#[cfg(any(feature = "ssr", doc))]
+pub use extract_routes::*;
 pub use history::*;
 pub use hooks::*;
-pub use matching::Branch;
+pub use matching::*;

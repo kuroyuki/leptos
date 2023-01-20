@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
@@ -11,41 +12,41 @@ use crate::{runtime::with_runtime, Scope};
 /// This is useful for passing values down to components or functions lower in a
 /// hierarchy without needs to “prop drill” by passing them through each layer as
 /// arguments to a function or properties of a component.
-/// 
+///
 /// Context works similarly to variable scope: a context that is provided higher in
 /// the component tree can be used lower down, but a context that is provided lower
 /// in the tree cannot be used higher up.
 ///
 /// ```
 /// use leptos::*;
-/// 
+///
 /// // define a newtype we'll provide as context
 /// // contexts are stored by their types, so it can be useful to create
 /// // a new type to avoid confusion with other `WriteSignal<i32>`s we may have
 /// // all types to be shared via context should implement `Clone`
 /// #[derive(Copy, Clone)]
 /// struct ValueSetter(WriteSignal<i32>);
-/// 
+///
 /// #[component]
-/// pub fn Provider(cx: Scope) -> Element {
+/// pub fn Provider(cx: Scope) -> impl IntoView {
 ///     let (value, set_value) = create_signal(cx, 0);
 ///     
 ///     // the newtype pattern isn't *necessary* here but is a good practice
 ///     // it avoids confusion with other possible future `WriteSignal<bool>` contexts
 ///     // and makes it easier to refer to it in ButtonD
 ///     provide_context(cx, ValueSetter(set_value));
-/// 
+///
 ///     // because <Consumer/> is nested inside <Provider/>,
 ///     // it has access to the provided context
 ///     view! { cx, <div><Consumer/></div> }
 /// }
-/// 
+///
 /// #[component]
-/// pub fn Consumer(cx: Scope) -> Element {
+/// pub fn Consumer(cx: Scope) -> impl IntoView {
 ///     // consume the provided context of type `ValueSetter` using `use_context`
 ///     // this traverses up the tree of `Scope`s and gets the nearest provided `ValueSetter`
 ///     let set_value = use_context::<ValueSetter>(cx).unwrap().0;
-/// 
+///
 ///     todo!()
 /// }
 /// ```
@@ -54,7 +55,8 @@ where
     T: Clone + 'static,
 {
     let id = value.type_id();
-    with_runtime(cx.runtime, |runtime| {
+
+    _ = with_runtime(cx.runtime, |runtime| {
         let mut contexts = runtime.scope_contexts.borrow_mut();
         let context = contexts.entry(cx.id).unwrap().or_insert_with(HashMap::new);
         context.insert(id, Box::new(value) as Box<dyn Any>);
@@ -69,41 +71,41 @@ where
 /// This is useful for passing values down to components or functions lower in a
 /// hierarchy without needs to “prop drill” by passing them through each layer as
 /// arguments to a function or properties of a component.
-/// 
+///
 /// Context works similarly to variable scope: a context that is provided higher in
 /// the component tree can be used lower down, but a context that is provided lower
 /// in the tree cannot be used higher up.
 ///
 /// ```
 /// use leptos::*;
-/// 
+///
 /// // define a newtype we'll provide as context
 /// // contexts are stored by their types, so it can be useful to create
 /// // a new type to avoid confusion with other `WriteSignal<i32>`s we may have
 /// // all types to be shared via context should implement `Clone`
 /// #[derive(Copy, Clone)]
 /// struct ValueSetter(WriteSignal<i32>);
-/// 
+///
 /// #[component]
-/// pub fn Provider(cx: Scope) -> Element {
+/// pub fn Provider(cx: Scope) -> impl IntoView {
 ///     let (value, set_value) = create_signal(cx, 0);
 ///     
 ///     // the newtype pattern isn't *necessary* here but is a good practice
 ///     // it avoids confusion with other possible future `WriteSignal<bool>` contexts
 ///     // and makes it easier to refer to it in ButtonD
 ///     provide_context(cx, ValueSetter(set_value));
-/// 
+///
 ///     // because <Consumer/> is nested inside <Provider/>,
 ///     // it has access to the provided context
 ///     view! { cx, <div><Consumer/></div> }
 /// }
-/// 
+///
 /// #[component]
-/// pub fn Consumer(cx: Scope) -> Element {
+/// pub fn Consumer(cx: Scope) -> impl IntoView {
 ///     // consume the provided context of type `ValueSetter` using `use_context`
 ///     // this traverses up the tree of `Scope`s and gets the nearest provided `ValueSetter`
 ///     let set_value = use_context::<ValueSetter>(cx).unwrap().0;
-/// 
+///
 ///     todo!()
 /// }
 /// ```
@@ -134,4 +136,6 @@ where
                 }),
         }
     })
+    .ok()
+    .flatten()
 }

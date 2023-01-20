@@ -6,7 +6,6 @@ use std::{
 };
 
 use leptos::*;
-use leptos::typed_builder::*;
 
 use crate::{
     matching::{
@@ -16,31 +15,46 @@ use crate::{
     RouteContext, RouterContext,
 };
 
-/// Props for the [Routes] component, which contains route definitions and manages routing.
-#[derive(TypedBuilder)]
-pub struct RoutesProps {
-    #[builder(default, setter(strip_option))]
-    base: Option<String>,
-    children: Box<dyn Fn() -> Vec<RouteDefinition>>,
-}
-
 /// Contains route definitions and manages the actual routing process.
 ///
 /// You should locate the `<Routes/>` component wherever on the page you want the routes to appear.
-#[allow(non_snake_case)]
-pub fn Routes(cx: Scope, props: RoutesProps) -> impl IntoChild {
+#[component]
+pub fn Routes(
+    cx: Scope,
+    #[prop(optional)] base: Option<String>,
+    children: Box<dyn FnOnce(Scope) -> Fragment>,
+) -> impl IntoView {
     let router = use_context::<RouterContext>(cx).unwrap_or_else(|| {
         log::warn!("<Routes/> component should be nested within a <Router/>.");
         panic!()
     });
+    let base_route = router.base();
 
     let mut branches = Vec::new();
+    let id_before = HydrationCtx::peek();
+    let frag = children(cx);
+    let children = frag
+        .as_children()
+        .iter()
+        .filter_map(|child| {
+            child
+                .as_transparent()
+                .and_then(|t| t.downcast_ref::<RouteDefinition>())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
     create_branches(
-        &(props.children)(),
-        &props.base.unwrap_or_default(),
+        &children,
+        &base.unwrap_or_default(),
         &mut Vec::new(),
         &mut branches,
     );
+
+    #[cfg(feature = "ssr")]
+    if let Some(context) = use_context::<crate::PossibleBranchContext>(cx) {
+        *context.0.borrow_mut() = branches.clone();
+    }
 
     // whenever path changes, update matches
     let matches = create_memo(cx, {
@@ -79,7 +93,8 @@ pub fn Routes(cx: Scope, props: RoutesProps) -> impl IntoChild {
 
                 match (prev_routes, prev_match) {
                     (Some(prev), Some(prev_match))
-                        if next_match.route.key == prev_match.route.key =>
+                        if next_match.route.key == prev_match.route.key
+                            && next_match.route.id == prev_match.route.id =>
                     {
                         let prev_one = { prev.borrow()[i].clone() };
                         if i >= next.borrow().len() {
@@ -130,7 +145,7 @@ pub fn Routes(cx: Scope, props: RoutesProps) -> impl IntoChild {
                             }
                         });
 
-                        if disposers.borrow().len() > i + 1 {
+                        if disposers.borrow().len() > i {
                             let mut disposers = disposers.borrow_mut();
                             let old_route_disposer = std::mem::replace(&mut disposers[i], disposer);
                             old_route_disposer.dispose();
@@ -178,27 +193,26 @@ pub fn Routes(cx: Scope, props: RoutesProps) -> impl IntoChild {
     let root = create_memo(cx, move |prev| {
         provide_context(cx, route_states);
         route_states.with(|state| {
-            let root = state.routes.borrow();
-            let root = root.get(0);
-            if let Some(route) = root {
-                provide_context(cx, route.clone());
-            }
-
-            if prev.is_none() || !root_equal.get() {
-                root.as_ref().map(|route| route.outlet().into_child(cx))
+            if state.routes.borrow().is_empty() {
+                Some(base_route.outlet().into_view(cx))
             } else {
-                prev.cloned().unwrap()
+                let root = state.routes.borrow();
+                let root = root.get(0);
+                if let Some(route) = root {
+                    provide_context(cx, route.clone());
+                }
+
+                if prev.is_none() || !root_equal.get() {
+                    root.as_ref().map(|route| route.outlet().into_view(cx))
+                } else {
+                    prev.cloned().unwrap()
+                }
             }
         })
     });
 
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "stable")] {
-            move || root.get()
-        } else {
-            root
-        }
-    }
+    HydrationCtx::continue_from(id_before);
+    (move || root.get()).into_view(cx)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -210,6 +224,7 @@ struct RouterState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteData {
+    pub id: usize,
     pub key: RouteDefinition,
     pub pattern: String,
     pub original_path: String,
@@ -226,6 +241,7 @@ impl RouteData {
             .split('/')
             .filter(|n| !n.is_empty())
             .collect::<Vec<_>>();
+        #[allow(clippy::bool_to_int_with_if)] // on the splat.is_none()
         segments.iter().fold(
             (segments.len() as i32) - if splat.is_none() { 0 } else { 1 },
             |score, segment| score + if segment.starts_with(':') { 2 } else { 3 },
@@ -271,7 +287,7 @@ fn create_routes(route_def: &RouteDefinition, base: &str) -> Vec<RouteData> {
     let RouteDefinition { children, .. } = route_def;
     let is_leaf = children.is_empty();
     let mut acc = Vec::new();
-    for original_path in expand_optionals(route_def.path) {
+    for original_path in expand_optionals(&route_def.path) {
         let path = join_paths(base, &original_path);
         let pattern = if is_leaf {
             path
@@ -283,6 +299,7 @@ fn create_routes(route_def: &RouteDefinition, base: &str) -> Vec<RouteData> {
         };
         acc.push(RouteData {
             key: route_def.clone(),
+            id: route_def.id,
             matcher: Matcher::new_with_partial(&pattern, !is_leaf),
             pattern,
             original_path: original_path.to_string(),

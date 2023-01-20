@@ -107,6 +107,25 @@ where
     fn into_param(value: Option<&str>, name: &str) -> Result<Self, ParamsError>;
 }
 
+impl<T> IntoParam for Option<T>
+where
+    T: FromStr,
+    <T as FromStr>::Err: std::error::Error + 'static,
+{
+    fn into_param(value: Option<&str>, _name: &str) -> Result<Self, ParamsError> {
+        match value {
+            None => Ok(None),
+            Some(value) => match T::from_str(value) {
+                Ok(value) => Ok(Some(value)),
+                Err(e) => {
+                    eprintln!("{e}");
+                    Err(ParamsError::Params(Rc::new(e)))
+                }
+            },
+        }
+    }
+}
+
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "stable"))] {
         auto trait NotOption {}
@@ -115,36 +134,6 @@ cfg_if::cfg_if! {
         impl<T> IntoParam for T
         where
             T: FromStr + NotOption,
-            <T as FromStr>::Err: std::error::Error + Send + Sync + 'static,
-        {
-            fn into_param(value: Option<&str>, name: &str) -> Result<Self, ParamsError> {
-                let value = value.ok_or_else(|| ParamsError::MissingParam(name.to_string()))?;
-                Self::from_str(value).map_err(|e| ParamsError::Params(Rc::new(e)))
-            }
-        }
-
-        impl<T> IntoParam for Option<T>
-        where
-            T: FromStr,
-            <T as FromStr>::Err: std::error::Error + 'static,
-        {
-            fn into_param(value: Option<&str>, _name: &str) -> Result<Self, ParamsError> {
-                match value {
-                    None => Ok(None),
-                    Some(value) => match T::from_str(value) {
-                        Ok(value) => Ok(Some(value)),
-                        Err(e) => {
-                            eprintln!("{}", e);
-                            Err(ParamsError::Params(Rc::new(e)))
-                        }
-                    },
-                }
-            }
-        }
-    } else {
-        impl<T> IntoParam for T
-        where
-            T: FromStr,
             <T as FromStr>::Err: std::error::Error + Send + Sync + 'static,
         {
             fn into_param(value: Option<&str>, name: &str) -> Result<Self, ParamsError> {

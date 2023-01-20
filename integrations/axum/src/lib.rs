@@ -1,17 +1,20 @@
+#![forbid(unsafe_code)]
+
 use axum::{
     body::{Body, Bytes, Full, StreamBody},
     extract::Path,
-    http::{HeaderMap, HeaderValue, Request, StatusCode},
+    http::{header::HeaderName, header::HeaderValue, HeaderMap, Request, StatusCode},
     response::IntoResponse,
+    routing::get,
 };
 use futures::{Future, SinkExt, Stream, StreamExt};
-use http::{method::Method, uri::Uri, version::Version, Response};
+use http::{header, method::Method, uri::Uri, version::Version, Response};
 use hyper::body;
 use leptos::*;
 use leptos_meta::MetaContext;
 use leptos_router::*;
 use std::{io, pin::Pin, sync::Arc};
-use tokio::{sync::RwLock, task::spawn_blocking};
+use tokio::{sync::RwLock, task::spawn_blocking, task::LocalSet};
 
 /// A struct to hold the parts of the incoming Request. Since `http::Request` isn't cloneable, we're forced
 /// to construct this for Leptos to use in Axum
@@ -31,18 +34,61 @@ pub struct ResponseParts {
     pub headers: HeaderMap,
 }
 
-/// Adding this Struct to your Scope inside of a Server Fn or Elements will allow you to override details of the Response
-/// like StatusCode and add Headers/Cookies. Because Elements and Server Fns are lower in the tree than the Response generation
-/// code, it needs to be wrapped in an `Arc<RwLock<>>` so that it can be surfaced
+impl ResponseParts {
+    /// Insert a header, overwriting any previous value with the same key
+    pub fn insert_header(&mut self, key: HeaderName, value: HeaderValue) {
+        self.headers.insert(key, value);
+    }
+    /// Append a header, leaving any header with the same key intact
+    pub fn append_header(&mut self, key: HeaderName, value: HeaderValue) {
+        self.headers.append(key, value);
+    }
+}
+
+/// Adding this Struct to your Scope inside of a Server Fn or Element will allow you to override details of the Response
+/// like status and add Headers/Cookies. Because Elements and Server Fns are lower in the tree than the Response generation
+/// code, it needs to be wrapped in an `Arc<RwLock<>>` so that it can be surfaced.
 #[derive(Debug, Clone, Default)]
 pub struct ResponseOptions(pub Arc<RwLock<ResponseParts>>);
 
 impl ResponseOptions {
-    /// A less boilerplatey way to overwrite the default contents of `ResponseOptions` with a new `ResponseParts`
+    /// A less boilerplatey way to overwrite the contents of `ResponseOptions` with a new `ResponseParts`
     pub async fn overwrite(&self, parts: ResponseParts) {
         let mut writable = self.0.write().await;
         *writable = parts
     }
+    /// Set the status of the returned Response
+    pub async fn set_status(&self, status: StatusCode) {
+        let mut writeable = self.0.write().await;
+        let res_parts = &mut *writeable;
+        res_parts.status = Some(status);
+    }
+    /// Insert a header, overwriting any previous value with the same key
+    pub async fn insert_header(&self, key: HeaderName, value: HeaderValue) {
+        let mut writeable = self.0.write().await;
+        let res_parts = &mut *writeable;
+        res_parts.headers.insert(key, value);
+    }
+    /// Append a header, leaving any header with the same key intact
+    pub async fn append_header(&self, key: HeaderName, value: HeaderValue) {
+        let mut writeable = self.0.write().await;
+        let res_parts = &mut *writeable;
+        res_parts.headers.append(key, value);
+    }
+}
+
+/// Provides an easy way to redirect the user from within a server function. Mimicing the Remix `redirect()`,
+/// it sets a StatusCode of 302 and a LOCATION header with the provided value.
+/// If looking to redirect from the client, `leptos_router::use_navigate()` should be used instead
+pub async fn redirect(cx: leptos::Scope, path: &str) {
+    let response_options = use_context::<ResponseOptions>(cx).unwrap();
+    response_options.set_status(StatusCode::FOUND).await;
+    response_options
+        .insert_header(
+            header::LOCATION,
+            header::HeaderValue::from_str(path).expect("Failed to create HeaderValue"),
+        )
+        .await;
 }
 
 pub async fn generate_request_parts(req: Request<Body>) -> RequestParts {
@@ -54,7 +100,7 @@ pub async fn generate_request_parts(req: Request<Body>) -> RequestParts {
         uri: parts.uri,
         headers: parts.headers,
         version: parts.version,
-        body: body.clone(),
+        body,
     }
 }
 
@@ -96,7 +142,7 @@ pub async fn handle_server_fns(
     req: Request<Body>,
 ) -> impl IntoResponse {
     // Axum Path extractor doesn't remove the first slash from the path, while Actix does
-    let fn_name: String = match fn_name.strip_prefix("/") {
+    let fn_name: String = match fn_name.strip_prefix('/') {
         Some(path) => path.to_string(),
         None => fn_name,
     };
@@ -137,15 +183,12 @@ pub async fn handle_server_fns(
                                     let res_options_outer = res_options.unwrap().0;
                                     let res_options_inner = res_options_outer.read().await;
                                     let (status, mut res_headers) = (
-                                        res_options_inner.status.clone(),
+                                        res_options_inner.status,
                                         res_options_inner.headers.clone(),
                                     );
 
-                                    match res.headers_mut() {
-                                        Some(header_ref) => {
-                                            header_ref.extend(res_headers.drain());
-                                        }
-                                        None => (),
+                                    if let Some(header_ref) = res.headers_mut() {
+                                           header_ref.extend(res_headers.drain());
                                     };
 
                                     if accept_header == Some("application/json")
@@ -154,13 +197,6 @@ pub async fn handle_server_fns(
                                         || accept_header == Some("application/cbor")
                                     {
                                         res = res.status(StatusCode::OK);
-
-                                        // Override Status if Status is set in ResponseParts and
-                                        // We're not trying to do a form submit
-                                        res = match status {
-                                            Some(status) => res.status(status),
-                                            None => res,
-                                        }
                                     }
                                     // otherwise, it's probably a <form> submit or something: redirect back to the referrer
                                     else {
@@ -168,10 +204,16 @@ pub async fn handle_server_fns(
                                             .get("Referer")
                                             .and_then(|value| value.to_str().ok())
                                             .unwrap_or("/");
+
                                         res = res
                                             .status(StatusCode::SEE_OTHER)
                                             .header("Location", referer);
                                     }
+                                    // Override StatusCode if it was set in a Resource or Element
+                                    res = match status {
+                                        Some(status) => res.status(status),
+                                        None => res,
+                                    };
                                     match serialized {
                                         Payload::Binary(data) => res
                                             .header("Content-Type", "application/cbor")
@@ -195,7 +237,9 @@ pub async fn handle_server_fns(
                             Response::builder()
                                 .status(StatusCode::BAD_REQUEST)
                                 .body(Full::from(
-                                    "Could not find a server function at that route.".to_string(),
+                                    format!("Could not find a server function at the route {fn_name}. \
+                                    \n\nIt's likely that you need to call ServerFn::register() on the \
+                                    server function type, somewhere in your `main` function." )
                                 ))
                         }
                         .expect("could not build Response");
@@ -226,25 +270,24 @@ pub type PinnedHtmlStream = Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>
 /// use axum::Router;
 /// use std::{net::SocketAddr, env};
 /// use leptos::*;
+/// use leptos_config::get_configuration;
 ///
 /// #[component]
-/// fn MyApp(cx: Scope) -> Element {
+/// fn MyApp(cx: Scope) -> impl IntoView {
 ///   view! { cx, <main>"Hello, world!"</main> }
 /// }
 ///
 /// # if false { // don't actually try to run a server in a doctest...
 /// #[tokio::main]
 /// async fn main() {
-///     let addr = SocketAddr::from(([127, 0, 0, 1], 8082));
-/// let render_options: RenderOptions = RenderOptions::builder()
-///     .pkg_path("/pkg/leptos_example")
-///     .socket_address(addr)
-///     .reload_port(3001)
-///     .environment(&env::var("RUST_ENV")).build();
-///
+///     
+///     let conf = get_configuration(Some("Cargo.toml")).await.unwrap();
+///     let leptos_options = conf.leptos_options;
+///     let addr = leptos_options.site_address.clone();
+///     
 ///     // build our application with a route
 ///     let app = Router::new()
-///     .fallback(leptos_axum::render_app_to_stream(render_options, |cx| view! { cx, <MyApp/> }));
+///     .fallback(leptos_axum::render_app_to_stream(leptos_options, |cx| view! { cx, <MyApp/> }));
 ///
 ///     // run our app with hyper
 ///     // `axum::Server` is a re-export of `hyper::Server`
@@ -256,15 +299,18 @@ pub type PinnedHtmlStream = Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>
 /// # }
 /// ```
 ///
-pub fn render_app_to_stream(
-    options: RenderOptions,
-    app_fn: impl Fn(leptos::Scope) -> Element + Clone + Send + 'static,
+pub fn render_app_to_stream<IV>(
+    options: LeptosOptions,
+    app_fn: impl Fn(leptos::Scope) -> IV + Clone + Send + 'static,
 ) -> impl Fn(
     Request<Body>,
 ) -> Pin<Box<dyn Future<Output = Response<StreamBody<PinnedHtmlStream>>> + Send + 'static>>
        + Clone
        + Send
-       + 'static {
+       + 'static
+where
+    IV: IntoView,
+{
     move |req: Request<Body>| {
         Box::pin({
             let options = options.clone();
@@ -275,35 +321,51 @@ pub fn render_app_to_stream(
 
             async move {
                 // Need to get the path and query string of the Request
-                let path = req.uri();
-                let query = path.query();
+                // For reasons that escape me, if the incoming URI protocol is https, it provides the absolute URI
+                // if http, it returns a relative path. Adding .path() seems to make it explicitly return the relative uri
+                let path = req.uri().path_and_query().unwrap().as_str();
 
-                let full_path;
-                if let Some(query) = query {
-                    full_path = "http://leptos".to_string() + &path.to_string() + "?" + query
-                } else {
-                    full_path = "http://leptos".to_string() + &path.to_string()
+                let full_path = format!("http://leptos.dev{path}");
+
+                let pkg_path = &options.site_pkg_dir;
+                let output_name = &options.output_name;
+
+                // Because wasm-pack adds _bg to the end of the WASM filename, and we want to mantain compatibility with it's default options
+                // we add _bg to the wasm files if cargo-leptos doesn't set the env var LEPTOS_OUTPUT_NAME
+                // Otherwise we need to add _bg because wasm_pack always does. This is not the same as options.output_name, which is set regardless
+                let mut wasm_output_name = output_name.clone();
+                if std::env::var("LEPTOS_OUTPUT_NAME").is_err() {
+                    wasm_output_name.push_str("_bg");
                 }
 
-                let pkg_path = &options.pkg_path;
-                let socket_ip = &options.socket_address.ip().to_string();
+                let site_ip = &options.site_address.ip().to_string();
                 let reload_port = options.reload_port;
 
-                let leptos_autoreload = match options.environment {
-                    RustEnv::DEV => format!(
+                let leptos_autoreload = match std::env::var("LEPTOS_WATCH").is_ok() {
+                    true => format!(
                         r#"
-                            <script crossorigin="">(function () {{
-                                var ws = new WebSocket('ws://{socket_ip}:{reload_port}/autoreload');
-                                ws.onmessage = (ev) => {{
-                                    console.log(`Reload message: `);
-                                    if (ev.data === 'reload') window.location.reload();
+                        <script crossorigin="">(function () {{
+                            var ws = new WebSocket('ws://{site_ip}:{reload_port}/live_reload');
+                            ws.onmessage = (ev) => {{
+                                let msg = JSON.parse(ev.data);
+                                if (msg.all) window.location.reload();
+                                if (msg.css) {{
+                                    const link = document.querySelector("link#leptos");
+                                    if (link) {{
+                                        let href = link.getAttribute('href').split('?')[0];
+                                        let newHref = href + '?version=' + new Date().getMilliseconds();
+                                        link.setAttribute('href', newHref);
+                                    }} else {{
+                                        console.warn("Could not find link#leptos");
+                                    }}
                                 }};
-                                ws.onclose = () => console.warn('Autoreload stopped. Manual reload necessary.');
-                            }})()
-                            </script>
+                            }};
+                            ws.onclose = () => console.warn('Live-reload stopped. Manual reload necessary.');
+                        }})()
+                        </script>
                         "#
                     ),
-                    RustEnv::PROD => "".to_string(),
+                    false => "".to_string(),
                 };
 
                 let head = format!(
@@ -312,9 +374,9 @@ pub fn render_app_to_stream(
                         <head>
                             <meta charset="utf-8"/>
                             <meta name="viewport" content="width=device-width, initial-scale=1"/>
-                            <link rel="modulepreload" href="{pkg_path}.js">
-                            <link rel="preload" href="{pkg_path}_bg.wasm" as="fetch" type="application/wasm" crossorigin="">
-                            <script type="module">import init, {{ hydrate }} from '{pkg_path}.js'; init('{pkg_path}_bg.wasm').then(hydrate);</script>
+                            <link rel="modulepreload" href="/{pkg_path}/{output_name}.js">
+                            <link rel="preload" href="/{pkg_path}/{wasm_output_name}.wasm" as="fetch" type="application/wasm" crossorigin="">
+                            <script type="module">import init, {{ hydrate }} from '/{pkg_path}/{output_name}.js'; init('/{pkg_path}/{wasm_output_name}.wasm').then(hydrate);</script>
                             {leptos_autoreload}
                             "#
                 );
@@ -332,37 +394,41 @@ pub fn render_app_to_stream(
                                 async move {
                                     tokio::task::LocalSet::new()
                                         .run_until(async {
-                                            let (cx, disposer, bundle) =
-                                                render_to_stream_undisposed({
-                                                    let full_path = full_path.clone();
-                                                    let req_parts =
-                                                        generate_request_parts(req).await;
-                                                    move |cx| {
-                                                        let integration = ServerIntegration {
-                                                            path: full_path.clone(),
-                                                        };
-                                                        provide_context(
-                                                            cx,
-                                                            RouterIntegrationContext::new(
-                                                                integration,
-                                                            ),
-                                                        );
-                                                        provide_context(cx, MetaContext::new());
-                                                        provide_context(cx, req_parts);
-                                                        provide_context(cx, default_res_options);
-                                                        let app = app_fn(cx);
+                                            let app = {
+                                                let full_path = full_path.clone();
+                                                let req_parts = generate_request_parts(req).await;
+                                                move |cx| {
+                                                    let integration = ServerIntegration {
+                                                        path: full_path.clone(),
+                                                    };
+                                                    provide_context(
+                                                        cx,
+                                                        RouterIntegrationContext::new(integration),
+                                                    );
+                                                    provide_context(cx, MetaContext::new());
+                                                    provide_context(cx, req_parts);
+                                                    provide_context(cx, default_res_options);
+                                                    app_fn(cx).into_view(cx)
+                                                }
+                                            };
+
+                                            let (bundle, runtime, scope) =
+                                                render_to_stream_with_prefix_undisposed(
+                                                    app,
+                                                    |cx| {
                                                         let head = use_context::<MetaContext>(cx)
                                                             .map(|meta| meta.dehydrate())
                                                             .unwrap_or_default();
-                                                        format!("{head}</head><body>{app}")
-                                                    }
-                                                });
+                                                        format!("{head}</head><body>").into()
+                                                    },
+                                                );
                                             let mut shell = Box::pin(bundle);
                                             while let Some(fragment) = shell.next().await {
                                                 _ = tx.send(fragment).await;
                                             }
 
                                             // Extract the value of ResponseOptions from here
+                                            let cx = Scope { runtime, id: scope };
                                             let res_options =
                                                 use_context::<ResponseOptions>(cx).unwrap();
 
@@ -371,8 +437,7 @@ pub fn render_app_to_stream(
                                             let mut writable = res_options2.0.write().await;
                                             *writable = new_res_parts;
 
-                                            // Dispose of things
-                                            disposer.dispose();
+                                            runtime.dispose();
 
                                             tx.close_channel();
                                         })
@@ -408,15 +473,96 @@ pub fn render_app_to_stream(
                     Box::pin(complete_stream) as PinnedHtmlStream
                 ));
 
-                match res_options.status {
-                    Some(status) => *res.status_mut() = status,
-                    None => (),
-                };
+                if let Some(status) = res_options.status {
+                    *res.status_mut() = status
+                }
                 let mut res_headers = res_options.headers.clone();
                 res.headers_mut().extend(res_headers.drain());
 
                 res
             }
         })
+    }
+}
+
+/// Generates a list of all routes defined in Leptos's Router in your app. We can then use this to automatically
+/// create routes in Axum's Router without having to use wildcard matching or fallbacks. Takes in your root app Element
+/// as an argument so it can walk you app tree. This version is tailored to generate Axum compatible paths.
+pub async fn generate_route_list<IV>(app_fn: impl FnOnce(Scope) -> IV + 'static) -> Vec<String>
+where
+    IV: IntoView + 'static,
+{
+    #[derive(Default, Clone, Debug)]
+    pub struct Routes(pub Arc<RwLock<Vec<String>>>);
+
+    let routes = Routes::default();
+    let routes_inner = routes.clone();
+
+    let local = LocalSet::new();
+    // Run the local task set.
+
+    local
+        .run_until(async move {
+            tokio::task::spawn_local(async move {
+                let routes = leptos_router::generate_route_list_inner(app_fn);
+                let mut writable = routes_inner.0.write().await;
+                *writable = routes;
+            })
+            .await
+            .unwrap();
+        })
+        .await;
+
+    let routes = routes.0.read().await.to_owned();
+    // Axum's Router defines Root routes as "/" not ""
+    let routes: Vec<String> = routes
+        .iter()
+        .map(|s| {
+            if s.is_empty() {
+                return "/".to_string();
+            }
+            s.to_string()
+        })
+        .collect();
+
+    if routes.is_empty() {
+        vec!["/".to_string()]
+    } else {
+        routes
+    }
+}
+
+/// This trait allows one to pass a list of routes and a render function to Axum's router, letting us avoid
+/// having to use wildcards or manually define all routes in multiple places.
+pub trait LeptosRoutes {
+    fn leptos_routes<IV>(
+        self,
+        options: LeptosOptions,
+        paths: Vec<String>,
+        app_fn: impl Fn(leptos::Scope) -> IV + Clone + Send + 'static,
+    ) -> Self
+    where
+        IV: IntoView + 'static;
+}
+/// The default implementation of `LeptosRoutes` which takes in a list of paths, and dispatches GET requests
+/// to those paths to Leptos's renderer.
+impl LeptosRoutes for axum::Router {
+    fn leptos_routes<IV>(
+        self,
+        options: LeptosOptions,
+        paths: Vec<String>,
+        app_fn: impl Fn(leptos::Scope) -> IV + Clone + Send + 'static,
+    ) -> Self
+    where
+        IV: IntoView + 'static,
+    {
+        let mut router = self;
+        for path in paths.iter() {
+            router = router.route(
+                path,
+                get(render_app_to_stream(options.clone(), app_fn.clone())),
+            );
+        }
+        router
     }
 }

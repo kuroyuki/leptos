@@ -1,4 +1,5 @@
 #![deny(missing_docs)]
+#![forbid(unsafe_code)]
 
 //! # Leptos Server Functions
 //!
@@ -31,8 +32,11 @@
 //! indicate that it should only run on the server (i.e., when you have an `ssr` feature in your
 //! crate that is enabled).
 //!
+//! **Important**: All server functions must be registered by calling [ServerFn::register]
+//! somewhere within your `main` function.
+//!
 //! ```rust,ignore
-//! # use leptos_reactive::*;
+//! # use leptos::*;
 //! #[server(ReadFromDB)]
 //! async fn read_posts(cx: Scope, how_many: usize, query: String) -> Result<Vec<Posts>, ServerFnError> {
 //!   // do some server-only work here to access the database
@@ -47,6 +51,11 @@
 //!   log::debug!("posts = {posts{:#?}");
 //! })
 //! # });
+//!
+//! // make sure you've registered it somewhere in main
+//! fn main() {
+//!   _ = ReadFromDB::register();
+//! }
 //! ```
 //!
 //! If you call this function from the client, it will serialize the function arguments and `POST`
@@ -163,6 +172,15 @@ pub fn server_fn_by_path(path: &str) -> Option<Arc<ServerFnTraitObj>> {
         .read()
         .ok()
         .and_then(|fns| fns.get(path).cloned())
+}
+
+/// Returns the set of currently-registered server function paths, for debugging purposes.
+#[cfg(any(feature = "ssr", doc))]
+pub fn server_fns_by_path() -> Vec<&'static str> {
+    REGISTERED_SERVER_FUNCTIONS
+        .read()
+        .map(|vals| vals.keys().copied().collect())
+        .unwrap_or_default()
 }
 
 /// Holds the current options for encoding types.
@@ -359,7 +377,6 @@ where
         Binary(Vec<u8>),
         Url(String),
     }
-    // log!("ARGS TO ENCODE: {:#}", &args);
     let args_encoded = match &enc {
         Encoding::Url => Payload::Url(
             serde_urlencoded::to_string(&args)
@@ -372,8 +389,6 @@ where
             Payload::Binary(buffer)
         }
     };
-
-    //log!("ENCODED DATA: {:#?}", args_encoded);
 
     let content_type_header = match &enc {
         Encoding::Url => "application/x-www-form-urlencoded",
